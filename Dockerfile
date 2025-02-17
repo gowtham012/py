@@ -1,52 +1,25 @@
-FROM python:3.9-slim
+# Use Apify's official Python-Selenium image as the base.
+FROM apify/actor-python-selenium:3.12
 
-RUN apt-get update && apt-get install -y \
-    wget \
-    gnupg \
-    unzip \
-    libnss3 \
-    libxss1 \
-    libasound2 \
-    libatk1.0-0 \
-    libatk-bridge2.0-0 \
-    libdrm2 \
-    libgbm1 \
-    libgtk-3-0 \
-    libxcomposite1 \
-    libxdamage1 \
-    libxfixes3 \
-    libxrandr2 \
-    && rm -rf /var/lib/apt/lists/*
+# Copy only requirements.txt first to leverage Docker cache.
+COPY requirements.txt ./
 
-# Install Google Chrome
-RUN wget -q -O - https://dl.google.com/linux/linux_signing_key.pub | apt-key add - \
-  && echo "deb [arch=amd64] https://dl.google.com/linux/chrome/deb/ stable main" >> /etc/apt/sources.list.d/google-chrome.list \
-  && apt-get update && apt-get install -y google-chrome-stable
+# Install dependencies from requirements.txt.
+RUN echo "Python version:" \
+    && python --version \
+    && echo "Pip version:" \
+    && pip --version \
+    && echo "Installing dependencies:" \
+    && pip install --no-cache-dir -r requirements.txt \
+    && echo "All installed packages:" \
+    && pip freeze
 
-# Debug - what version do we have?
-RUN google-chrome --version
+# Copy the rest of the source code into the container.
+COPY . ./
 
-# Install matching ChromeDriver
-RUN CHROME_VERSION=$(google-chrome --version | sed -E 's/.* ([0-9]+)\..*/\1/') \
-  && echo "Chrome major version: $CHROME_VERSION" \
-  && wget -q "https://chromedriver.storage.googleapis.com/LATEST_RELEASE_${CHROME_VERSION}" -O /tmp/LATEST_RELEASE \
-  && CHROMEDRIVER_VERSION=$(cat /tmp/LATEST_RELEASE) \
-  && echo "ChromeDriver version: $CHROMEDRIVER_VERSION" \
-  && wget -q "https://chromedriver.storage.googleapis.com/${CHROMEDRIVER_VERSION}/chromedriver_linux64.zip" -O /tmp/chromedriver.zip \
-  && unzip /tmp/chromedriver.zip -d /usr/local/bin/ \
-  && rm /tmp/chromedriver.zip
+# (Optional) Compile all Python files to check for errors.
+RUN python3 -m compileall -q .
 
-
-# Set display (needed for headless Chrome but no real display)
-ENV DISPLAY=:99
-
-# Copy requirements if you have any
-COPY requirements.txt /app/requirements.txt
-RUN pip install --no-cache-dir -r /app/requirements.txt
-
-# Copy code
-COPY . /app
-WORKDIR /app
-
-# Run your main.py on container start
-ENTRYPOINT ["python", "main.py"]
+# Set the default command to run your main script.
+# For example, if your main file is named "main.py", run:
+CMD ["python3", "main.py"]
