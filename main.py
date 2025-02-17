@@ -1,6 +1,7 @@
 import os
 import csv
 import time
+import math
 import multiprocessing
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options as ChromeOptions
@@ -8,30 +9,42 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 
-LINKS_FILENAME = "found_links.txt"
+####################
+# CONFIG
+####################
+LINKS_FILENAME = "found_links.txt"  # This file must exist (created in Phase 1)
 CSV_FILENAME = "AllRecipes.csv"
-NUM_PROCESSES = 4  # Adjust based on Apify memory/CPU. Start with 2 or 4.
+NUM_PROCESSES = 4  # Adjust based on your CPU; more processes may be faster but require more resources.
 
-def init_driver():
-    """Initialize and return a headless Chrome WebDriver for local use."""
+####################
+# LOCAL HEADLESS DRIVER
+####################
+def init_local_driver():
+    """
+    Initialize and return a local headless Chrome WebDriver.
+    Ensure Chrome and matching ChromeDriver are installed on your system.
+    """
     chrome_options = ChromeOptions()
     chrome_options.add_argument("--headless")
     chrome_options.add_argument("--no-sandbox")
     chrome_options.add_argument("--disable-dev-shm-usage")
     chrome_options.add_argument("--disable-gpu")
-
     driver = webdriver.Chrome(options=chrome_options)
     driver.implicitly_wait(5)
+    driver.set_window_size(1920, 1080)
     return driver
 
+####################
+# HELPER METHODS
+####################
 def is_valid_recipe(driver):
     """
-    Check if the current page has essential elements:
-      1) heading
-      2) description
-      3) at least one image
-      4) at least one direction step
-      5) at least one ingredient
+    Check if the current page has essential recipe elements:
+      1) recipe_name (heading)
+      2) recipe_description
+      3) at least one image (recipe_image != "N/A")
+      4) non-empty directions list
+      5) non-empty ingredients list
     """
     try:
         heading = driver.find_element(By.CSS_SELECTOR, "h1.article-heading.text-headline-400")
@@ -76,44 +89,57 @@ def get_nutrition_values(driver, nutrient_name):
     except:
         return ("N/A", "N/A")
 
+####################
+# SCRAPE FUNCTION (Worker)
+####################
 def scrape_link(args):
     """
     Each process calls this with (cat_name, url, recipe_id).
-    We open a local headless Chrome, scrape the recipe, return a dict or None.
+    It opens a local headless Chrome, scrapes the recipe, and returns a dict or None.
+    Only recipes with all essential data (name, description, image, directions, ingredients) are considered valid.
     """
     cat_name, url, recipe_id = args
     driver = None
     try:
-        driver = init_driver()
+        driver = init_local_driver()
         driver.get(url)
         WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.CSS_SELECTOR, "body")))
 
-        # Check validity
         if not is_valid_recipe(driver):
             print(f"[SKIP] Not a valid recipe: {url}")
             return None
 
-        # Gather basic data
+        # Gather essential fields
         recipe_name = get_text(driver, By.CSS_SELECTOR, "h1.article-heading.text-headline-400")
         recipe_desc = get_text(driver, By.CSS_SELECTOR, "p.article-subheading.text-body-100")
-
+        
         images = driver.find_elements(By.CSS_SELECTOR, "div.img-placeholder img.universal-image__image")
-        recipe_img = "N/A"
         if images:
             recipe_img = images[0].get_attribute("data-src")
             if recipe_img and "video" in recipe_img.lower() and len(images) > 1:
                 recipe_img = images[1].get_attribute("data-src")
-
+        else:
+            recipe_img = "N/A"
+        
         directions = [step.text for step in driver.find_elements(
             By.CSS_SELECTOR, "ol.mntl-sc-block-group--OL li p:first-of-type"
         )]
         ingredients = {
-            i+1: ing.text
-            for i, ing in enumerate(
+            i+1: ing.text for i, ing in enumerate(
                 driver.find_elements(By.CSS_SELECTOR, "ul.mm-recipes-structured-ingredients__list li")
             )
         }
 
+        # Check that essential fields are non-empty
+        if (not recipe_name or recipe_name == "N/A" or
+            not recipe_desc or recipe_desc == "N/A" or
+            recipe_img == "N/A" or
+            len(directions) == 0 or
+            len(ingredients) == 0):
+            print(f"[SKIP] Missing essential data for {url}")
+            return None
+
+        # Optional: Gather additional details
         prep_time = get_text(driver, By.XPATH, "//div[contains(text(), 'Prep Time:')]/following-sibling::div")
         cook_time = get_text(driver, By.XPATH, "//div[contains(text(), 'Cook Time:')]/following-sibling::div")
         chill_time = get_text(driver, By.XPATH, "//div[contains(text(), 'Chill Time:')]/following-sibling::div", default="N/A")
@@ -121,7 +147,6 @@ def scrape_link(args):
         servings = get_text(driver, By.XPATH, "//div[contains(text(), 'Servings:')]/following-sibling::div")
         calories_total = get_text(driver, By.XPATH, "//td[contains(@class, 'mm-recipes-nutrition-facts-summary__table-cell')]")
 
-        # Attempt to reveal hidden nutrition
         try:
             show_label_button = driver.find_element(By.CSS_SELECTOR, ".mm-recipes-nutrition-facts-label__button")
             driver.execute_script("arguments[0].click();", show_label_button)
@@ -172,6 +197,7 @@ def scrape_link(args):
 
         print(f"[OK] ID {recipe_id} from '{cat_name}'")
         return record
+
     except Exception as e:
         print(f"[ERR] {url}: {e}")
         return None
@@ -179,21 +205,24 @@ def scrape_link(args):
         if driver:
             driver.quit()
 
+####################
+# MAIN
+####################
 def main():
     """
-    Apify-ready Phase 2 code with local concurrency in headless mode. 
-    Expects 'found_links.txt' in the same folder. Writes 'AllRecipes.csv'.
+    Phase 2 local code running in headless mode with parallel processes.
+    Reads 'found_links.txt', scrapes each link, and writes results to 'AllRecipes.csv'.
     """
     if not os.path.isfile(LINKS_FILENAME):
-        print(f"Error: '{LINKS_FILENAME}' not found. Did you run Phase 1?")
+        print(f"Error: '{LINKS_FILENAME}' not found. Did you complete Phase 1?")
         return
 
     start = time.time()
 
-    # Load lines from found_links.txt
+    # Load all lines from found_links.txt and create a list of tuples: (cat_name, url, recipe_id)
     links_data = []
     with open(LINKS_FILENAME, "r", encoding="utf-8") as lf:
-        i = 1
+        idx = 1
         for line in lf:
             line = line.strip()
             if not line:
@@ -203,10 +232,10 @@ def main():
                 continue
             cat_name = parts[0].strip()
             url = parts[1].strip()
-            links_data.append((cat_name, url, i))
-            i += 1
+            links_data.append((cat_name, url, idx))
+            idx += 1
 
-    print(f"Scraping {len(links_data)} total links with concurrency={NUM_PROCESSES} in headless mode.")
+    print(f"Scraping {len(links_data)} total links with concurrency={NUM_PROCESSES} (headless).")
 
     # CSV setup
     fieldnames = [
@@ -223,18 +252,14 @@ def main():
         "protein_weight", "protein_percent"
     ]
     file_exists = os.path.isfile(CSV_FILENAME)
-
     with open(CSV_FILENAME, "a", newline="", encoding="utf-8") as csvfile:
         writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
-        # Write header if file is new
         if not file_exists or os.stat(CSV_FILENAME).st_size == 0:
             writer.writeheader()
 
         total_written = 0
-
         with multiprocessing.Pool(processes=NUM_PROCESSES) as pool:
             results_iter = pool.imap_unordered(scrape_link, links_data)
-
             for record in results_iter:
                 if record is not None:
                     writer.writerow(record)
